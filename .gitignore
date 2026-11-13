@@ -1,0 +1,14 @@
+# secrets (wallet key, API key)
+.env
+.env.*
+
+# local backups
+*.bak*
+
+# runtime data (created by server.js)
+data/
+
+# local Claude Code settings
+.claude/settings.local.json
+
+node_modules/
