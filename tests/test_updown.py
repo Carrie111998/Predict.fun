@@ -66,11 +66,10 @@ class Paper(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(feeds, "binance_klines", return_value=rows), \
                 mock.patch.object(feeds, "binance_price_at", side_effect=[100.0, 100.3]), \
-                mock.patch.object(feeds.time, "time", return_value=999_999_900 + 280), \
-                mock.patch("updown.paper.time.time", return_value=999_999_900 + 280), \
                 mock.patch("updown.paper.simulated_market", return_value=(0.80, 0.25)):
-            pt = PaperTrader(["BTC"], StrategyConfig(), ModelParams(), 1000, d)
-            pt.pf.key = None
+            pt = PaperTrader(["BTC"], StrategyConfig(), ModelParams(), 1000, d,
+                             clock=lambda: 999_999_900 + 280)
+            pt.feed.pf.key = None
             pt.tick()
             self.assertEqual(len(pt.state["open"]), 1)
             self.assertEqual(pt.state["open"][0]["side"], "UP")
@@ -78,6 +77,21 @@ class Paper(unittest.TestCase):
             self.assertEqual(pt.state["open"], [])
             self.assertGreater(pt.state["bankroll"], 1000)
             self.assertIn("BTC", pt.summary())
+
+
+class Demo(unittest.TestCase):
+    def test_demo_feed_and_snapshot(self):
+        from updown.demo import DemoClock, DemoFeed
+        clock = DemoClock(1.0)
+        feed = DemoFeed(clock)
+        with tempfile.TemporaryDirectory() as d:
+            pt = PaperTrader(["BTC", "ETH", "BNB"], StrategyConfig(), ModelParams(), 1000, d,
+                             feed=feed, clock=clock)
+            pt.tick(verbose=False)
+            snap = pt.snapshot()
+            self.assertEqual(snap["mode"], "demo")
+            self.assertEqual(set(snap["signals"]), {"BTC", "ETH", "BNB"})
+            self.assertTrue(0 < snap["signals"]["BTC"]["p_up"] < 1)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 Every few seconds, for each asset:
   1. work out the current 5-minute window and its price to beat
-  2. pull the last ~16 minutes of 1-second Binance bars
+  2. pull the last ~16 minutes of 1-second price bars
   3. compute P(Up) with the model + indicators
   4. read predict.fun's orderbook (or a simulated market without an API key)
   5. place a *paper* bet when the edge clears the thresholds
@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import threading
 import time
 from dataclasses import asdict
 
@@ -29,14 +30,47 @@ FIELDS = ["opened_at", "asset", "window_start", "seconds_left", "side", "price",
           "bankroll_after"]
 
 
+class LiveFeed:
+    """Binance prices + predict.fun orderbook (simulated market without an API key)."""
+    name = "live"
+
+    def __init__(self):
+        self.pf = feeds.PredictFun()
+
+    def bars(self, asset):
+        return feeds.klines_to_bars(feeds.binance_klines(asset, "1s", 1000))
+
+    def price_at(self, asset, ts):
+        return feeds.binance_price_at(asset, ts)
+
+    def market(self, asset, ws, bars, k, left, cfg):
+        """Returns (up_ask, down_ask, source, market_json)."""
+        if self.pf.enabled and left <= cfg.max_seconds_left:
+            try:
+                m = self.pf.find_current_market(asset, ws)
+                if m:
+                    up, down = feeds.top_of_book(self.pf.orderbook(m["id"]))
+                    return up, down, "predict.fun", m
+            except Exception as e:
+                print(f"  [{asset}] predict.fun error: {e}; using simulated market")
+        up, down = simulated_market(bars, k, left)
+        return up, down, "simulated", None
+
+
 class PaperTrader:
     def __init__(self, assets, cfg: StrategyConfig, params: ModelParams, bankroll: float,
-                 out_dir: str = "."):
+                 out_dir: str = ".", feed=None, clock=time.time):
         self.assets, self.cfg, self.params = assets, cfg, params
-        self.pf = feeds.PredictFun()
+        self.feed = feed or LiveFeed()
+        self.clock = clock
         self.out = out_dir
+        self.lock = threading.Lock()
+        self.signals: dict[str, dict] = {}
+        self.equity: list[list[float]] = []
+        self.start_bankroll = bankroll
         os.makedirs(out_dir, exist_ok=True)
         self.state = self._load() or {"bankroll": bankroll, "open": [], "strikes": {}, "stats": {}}
+        self.closed: list[dict] = self._load_trades()
 
     # ------------------------------------------------------------ persistence
     def _path(self, name):
@@ -48,6 +82,13 @@ class PaperTrader:
                 return json.load(f)
         except (OSError, ValueError):
             return None
+
+    def _load_trades(self):
+        try:
+            with open(self._path(TRADES_FILE)) as f:
+                return list(csv.DictReader(f))[-500:]
+        except OSError:
+            return []
 
     def _save(self):
         with open(self._path(STATE_FILE), "w") as f:
@@ -61,6 +102,8 @@ class PaperTrader:
             if new:
                 w.writeheader()
             w.writerow({k: row.get(k, "") for k in FIELDS})
+        self.closed.append({k: row.get(k, "") for k in FIELDS})
+        self.closed = self.closed[-500:]
 
     # ------------------------------------------------------------ helpers
     def _strike(self, asset: str, ws: int, market: dict | None) -> float | None:
@@ -74,25 +117,15 @@ class PaperTrader:
                     k = float(market[f])
                     break
         if k is None:
-            k = feeds.binance_price_at(asset, ws)
+            k = self.feed.price_at(asset, ws)
         if k is not None:
             self.state["strikes"][key] = k
-            # keep the map small
             for old in [s for s in self.state["strikes"] if int(s.split(":")[1]) < ws - 3600]:
                 del self.state["strikes"][old]
         return k
 
-    def _market_prices(self, asset, ws, bars, k, left):
-        if self.pf.enabled:
-            try:
-                m = self.pf.find_current_market(asset, ws)
-                if m:
-                    up, down = feeds.top_of_book(self.pf.orderbook(m["id"]))
-                    return up, down, "predict.fun", m
-            except Exception as e:
-                print(f"  [{asset}] predict.fun error: {e}; using simulated market")
-        up, down = simulated_market(bars, k, left)
-        return up, down, "simulated", None
+    def equity_value(self) -> float:
+        return self.state["bankroll"] + sum(p["stake"] for p in self.state["open"])
 
     # ------------------------------------------------------------ main loop
     def settle_due(self, now: float):
@@ -102,7 +135,7 @@ class PaperTrader:
             if now < end + 3:
                 still.append(p)
                 continue
-            final = feeds.binance_price_at(p["asset"], end)
+            final = self.feed.price_at(p["asset"], end)
             if final is None:
                 still.append(p)
                 continue
@@ -113,40 +146,51 @@ class PaperTrader:
             st["n"] += 1
             st["wins"] += int(won)
             st["pnl"] = round(st["pnl"] + pnl, 4)
-            row = {**p, "final_price": final, "won": won, "pnl": pnl,
-                   "bankroll_after": self.state["bankroll"]}
-            self._log_trade(row)
+            self._log_trade({**p, "final_price": final, "won": won, "pnl": pnl,
+                             "bankroll_after": self.state["bankroll"]})
             print(f"  SETTLED {p['asset']} {p['side']} @ {p['price']:.2f}  "
                   f"{'WIN ' if won else 'LOSS'} {pnl:+.2f}  bankroll {self.state['bankroll']:.2f}")
         self.state["open"] = still
 
-    def tick(self):
-        now = time.time()
+    def tick(self, verbose: bool = True):
+        with self.lock:
+            self._tick(verbose)
+
+    def _tick(self, verbose):
+        now = self.clock()
         self.settle_due(now)
         ws, we = feeds.window_bounds(now)
         left = we - now
         for asset in self.assets:
-            if any(p["asset"] == asset and p["window_start"] == ws for p in self.state["open"]):
-                continue
             try:
-                bars = feeds.klines_to_bars(feeds.binance_klines(asset, "1s", 1000))
-                market = None
-                up = down = None
-                src = "simulated"
-                if self.pf.enabled and left <= self.cfg.max_seconds_left:
-                    up, down, src, market = self._market_prices(asset, ws, bars, 0, left)
+                bars = self.feed.bars(asset)
+                holding = any(p["asset"] == asset and p["window_start"] == ws for p in self.state["open"])
+                k0 = self.state["strikes"].get(f"{asset}:{ws}") or bars.closes[-1]
+                up, down, src, market = self.feed.market(asset, ws, bars, k0, left, self.cfg)
                 k = self._strike(asset, ws, market)
                 if k is None:
                     continue
-                sig = predict(bars, k, left, self.params)
-                if src == "simulated":
+                if src == "simulated" and k != k0:
                     up, down = simulated_market(bars, k, left)
-                d = decide(sig, up, down, self.state["bankroll"], self.cfg)
+                sig = predict(bars, k, left, self.params)
+                d = None if holding else decide(sig, up, down, self.equity_value(), self.cfg)
                 f = sig.features
-                print(f"{time.strftime('%H:%M:%S')} {asset} left {left:5.1f}s  spot {sig.spot:.2f}  "
-                      f"beat {k:.2f}  P(up) {sig.p_up:.3f}  ask U/D {up}/{down} [{src}]  "
-                      f"RSI {f['rsi']:.0f} flow {f['imbalance']:+.2f} score {f['score']:+.2f}"
-                      + (f"  -> BET {d.side} ${d.stake} @ {d.price:.2f}" if d else ""))
+                edge_up = None if up is None else sig.p_up - up - self.cfg.fee_rate
+                edge_dn = None if down is None else (1 - sig.p_up) - down - self.cfg.fee_rate
+                self.signals[asset] = {
+                    "asset": asset, "ts": now, "window_start": ws, "seconds_left": left,
+                    "spot": sig.spot, "price_to_beat": k, "p_up": sig.p_up, "up_ask": up,
+                    "down_ask": down, "edge_up": edge_up, "edge_down": edge_dn, "source": src,
+                    "features": f, "sigma": sig.sigma,
+                    "action": f"BET {d.side} ${d.stake:.2f} @ {d.price:.2f}" if d else
+                              ("HOLDING" if holding else "WATCHING"),
+                    "history": (self.signals.get(asset, {}).get("history", []) + [[now, sig.p_up]])[-150:],
+                }
+                if verbose:
+                    print(f"{time.strftime('%H:%M:%S', time.localtime(now))} {asset} left {left:5.1f}s "
+                          f"spot {sig.spot:.2f} beat {k:.2f} P(up) {sig.p_up:.3f} ask U/D {up}/{down} "
+                          f"[{src}] RSI {f['rsi']:.0f} flow {f['imbalance']:+.2f} score {f['score']:+.2f}"
+                          + (f"  -> BET {d.side} ${d.stake} @ {d.price:.2f}" if d else ""))
                 if d:
                     self.state["bankroll"] = round(self.state["bankroll"] - d.stake, 4)
                     self.state["open"].append({
@@ -156,7 +200,21 @@ class PaperTrader:
                         "market_source": src})
             except Exception as e:
                 print(f"  [{asset}] error: {e}")
+        if not self.equity or now - self.equity[-1][0] >= 5:
+            self.equity.append([now, round(self.equity_value(), 2)])
+            self.equity = self.equity[-2000:]
         self._save()
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {
+                "now": self.clock(), "mode": getattr(self.feed, "name", "live"),
+                "bankroll": self.state["bankroll"], "equity": self.equity_value(),
+                "start_bankroll": self.start_bankroll, "stats": self.state["stats"],
+                "open": self.state["open"], "signals": self.signals,
+                "trades": self.closed[-100:][::-1], "equity_curve": self.equity,
+                "config": asdict(self.cfg),
+            }
 
     def summary(self) -> str:
         parts = [f"bankroll {self.state['bankroll']:.2f}"]
@@ -165,12 +223,13 @@ class PaperTrader:
                 parts.append(f"{a}: {s['n']} bets {s['wins']/s['n']:.0%} win pnl {s['pnl']:+.2f}")
         return " | ".join(parts)
 
-    def run(self, poll: float = 3.0):
-        print(f"Paper trading {', '.join(self.assets)} | predict.fun orderbook: "
-              f"{'ON' if self.pf.enabled else 'OFF (set PREDICT_API_KEY) - simulated market'}")
+    def run(self, poll: float = 3.0, verbose: bool = True, stop: threading.Event | None = None):
+        pf = getattr(self.feed, "pf", None)
+        print(f"Paper trading {', '.join(self.assets)} | feed: {getattr(self.feed, 'name', 'live')} | "
+              f"predict.fun orderbook: {'ON' if pf and pf.enabled else 'OFF - simulated market'}")
         last = 0.0
-        while True:
-            self.tick()
+        while not (stop and stop.is_set()):
+            self.tick(verbose)
             if time.time() - last > 60:
                 print("  >> " + self.summary())
                 last = time.time()

@@ -32,6 +32,15 @@ def main(argv=None):
     p.add_argument("--poll", type=float, default=3.0)
     p.add_argument("--out", default="paper_data")
 
+    d = sub.add_parser("dashboard", help="run the paper trader with a live web dashboard")
+    common(d)
+    d.add_argument("--port", type=int, default=8050)
+    d.add_argument("--host", default="127.0.0.1")
+    d.add_argument("--poll", type=float, default=2.0)
+    d.add_argument("--out", default=None, help="data folder (default paper_data, or demo_data with --demo)")
+    d.add_argument("--demo", action="store_true", help="offline simulated prices and market")
+    d.add_argument("--speed", type=float, default=1.0, help="demo clock speed (e.g. 10 = 10x)")
+
     b = sub.add_parser("backtest", help="calibration + simulated P&L on Binance history")
     common(b)
     b.add_argument("--hours", type=float, default=6)
@@ -82,6 +91,22 @@ def main(argv=None):
             rep = backtest.run(series, cfg, params, a.bankroll)
             print(rep.text(asset + (" (synthetic)" if a.synthetic else "")))
             print()
+        return
+
+    if a.cmd == "dashboard":
+        from .dashboard import serve
+        feed = clock = None
+        if a.demo:
+            from .demo import DemoClock, DemoFeed
+            clock = DemoClock(a.speed)
+            feed = DemoFeed(clock)
+        out = a.out or ("demo_data" if a.demo else "paper_data")
+        if a.demo:  # a demo always starts fresh
+            import shutil
+            shutil.rmtree(out, ignore_errors=True)
+        trader = PaperTrader(assets, cfg, params, a.bankroll, out, feed=feed,
+                             **({"clock": clock} if clock else {}))
+        serve(trader, a.host, a.port, a.poll)
         return
 
     PaperTrader(assets, cfg, params, a.bankroll, a.out).run(a.poll)

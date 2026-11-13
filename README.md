@@ -62,12 +62,29 @@ python -m updown backtest --hours 24
 export PREDICT_API_KEY=...        # optional: real predict.fun orderbook
 python -m updown paper
 
+# Web dashboard: signals, open bets, trades, equity curve
+python -m updown dashboard            # then open http://localhost:8050
+python -m updown dashboard --demo --speed 10   # offline demo, simulated data, 10x clock
+
 # Check predict.fun API access / market lookup
 python -m updown probe
 ```
 
 Useful options (all commands): `--min-edge 0.04 --min-prob 0.60 --max-left 150
 --min-left 8 --max-price 0.93 --fee 0.01 --kelly 0.25 --momentum 0.15 --bankroll 1000`.
+
+### Dashboard
+`python -m updown dashboard` runs the same paper trader as `paper` and serves a
+page at http://localhost:8050 that refreshes every 2 seconds. It shows:
+- **Signal cards** for BTC / ETH / BNB: P(Up) vs P(Down), spot vs price to beat,
+  Up/Down ask and edge, RSI, order flow, EMA gap, indicator score, the P(Up) line for
+  the current window, and the bot's action (WATCHING / BET / HOLDING).
+- **KPIs**: equity, profit/loss, win rate against the break-even rate, bets settled and open bets.
+- **Equity curve**, **open bets** and **recent trades** with win/loss and P&L.
+
+`--demo` uses simulated prices and a deliberately *mispriced* simulated market,
+so the bot finds trades and wins often. That's only for checking that the
+dashboard works. It says nothing about real profitability.
 
 ### Without a predict.fun API key
 The bot simulates an efficient market: same maths, no indicator tilt, plus a
