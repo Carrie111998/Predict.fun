@@ -1,4 +1,21 @@
-__pycache__/
-*.pyc
+# secrets (wallet key, API key)
+.env
+.env.*
+
+# local backups
+*.bak*
+
+# runtime data
+data/
 paper_data/
 demo_data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# local Claude Code settings
+.claude/settings.local.json

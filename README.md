@@ -1,4 +1,50 @@
-# updown: 5-minute BTC / ETH / BNB up-or-down predictor and paper trader
+# predict.fun 5-minute up/down predictors (BTC, ETH, BNB)
+
+This repo holds two independent tools for predict.fun's 5-minute up/down markets.
+Neither places real orders.
+
+| Tool | Language | Start | Opens |
+|---|---|---|---|
+| [Live predictor](#live-predictor-node) | Node.js (`server.js`, `index.html`) | double-click `start.cmd` | http://localhost:8790 |
+| [updown](#updown-python) – signals, backtester, paper trader, dashboard | Python 3.10+ (`updown/`) | `python -m updown dashboard` | http://localhost:8050 |
+
+---
+
+<a id="live-predictor-node"></a>
+## Live predictor (Node)
+
+Prediction only: it never places orders. Open **http://localhost:8790** after starting it.
+
+### Start
+Double-click `start.cmd` (keeps running and restarts itself if it stops). Leave the window open.
+
+### What it shows, per coin
+- **Current round:** chance of Up (price vs the round's open, scaled by recent volatility and time left),
+  the Predict.fun price for Up and Down, the most the side is worth, and a plain suggestion:
+  `BUY <side> at X¢ or less – stake $S to win about $0.25`, or why to skip.
+- **Next round:** market price and a momentum lean, with its measured past accuracy (about 48–51% –
+  essentially a coin flip, so the tool says so).
+- **Scoreboard:** every prediction at 1:00, 2:00, 3:00 and 4:00 into a round is logged to
+  `data/predictions.jsonl` and checked against the result, showing accuracy and profit per $1 at each checkpoint.
+
+### Target profit
+Set "Target profit per win" (default $0.25). Stake for a target: `stake = target × price ÷ (1 − price)`.
+Example: at 80¢, a $1.00 stake wins $0.25; at 90¢ you would need $2.25 to win $0.25.
+
+### What the research says (and what we measured on your own bets)
+- High win rates do not mean profit: at 85¢ you must be right about 85% of the time just to break even.
+  A public test of 176 bot trades on Polymarket's 15-min markets had a 92% win rate and made about $2 in total,
+  because wins were ~$0.15 and losses ~$12.
+- Obvious moves are already priced in; the edge is buying only when the market price is below the
+  model's value. The tool applies a 3-point safety margin for fees, slippage and model error.
+- "Buy both sides for under $1" arbitrage, the one consistently profitable bot strategy reported, does not
+  exist on Predict.fun: the Down price mirrors the Up price, so both sides always cost more than $1 together.
+- Predict.fun settles on Chainlink prices; this tool uses Binance. They are very close, but near-flat rounds can differ.
+
+---
+
+<a id="updown-python"></a>
+## updown: 5-minute BTC / ETH / BNB up-or-down predictor and paper trader
 
 A bot for predict.fun's `btc-updown-5m`, `eth-updown-5m` and `bnb-updown-5m`
 markets. It predicts whether price will close **at or above the price to beat**
@@ -8,7 +54,7 @@ favour. It never sends real orders.
 
 Pure Python 3.10+ standard library, so there is nothing to install.
 
-## Is there a trick to win every bet?
+### Is there a trick to win every bet?
 
 No. Nobody can predict 5-minute crypto moves reliably: early in a window the
 true odds are close to 50/50. If a "win every time" trick existed, market makers
@@ -36,7 +82,7 @@ There are real edges, but they are small:
    disagree. The bot won't trade with fewer than 8 seconds left.
    **Check the resolution rules on the market page** and adjust if they use a TWAP.
 
-## The model
+### The model
 
 ```
 P(Up) = Φ( (ln(S/K) + μ·t) / (σ·√t) )
@@ -48,7 +94,7 @@ small drift from the indicator score.
 The bot bets when `P(side) − ask − fee ≥ min_edge` and `P(side) ≥ min_prob`,
 and only inside the entry window.
 
-## Usage
+### Usage
 
 ```bash
 # 1. Current prediction for each asset
@@ -73,7 +119,7 @@ python -m updown probe
 Useful options (all commands): `--min-edge 0.04 --min-prob 0.60 --max-left 150
 --min-left 8 --max-price 0.93 --fee 0.01 --kelly 0.25 --momentum 0.15 --bankroll 1000`.
 
-### Dashboard
+#### Dashboard
 `python -m updown dashboard` runs the same paper trader as `paper` and serves a
 page at http://localhost:8050 that refreshes every 2 seconds. It shows:
 - **Signal cards** for BTC / ETH / BNB: P(Up) vs P(Down), spot vs price to beat,
@@ -86,20 +132,20 @@ page at http://localhost:8050 that refreshes every 2 seconds. It shows:
 so the bot finds trades and wins often. That's only for checking that the
 dashboard works. It says nothing about real profitability.
 
-### Without a predict.fun API key
+#### Without a predict.fun API key
 The bot simulates an efficient market: same maths, no indicator tilt, plus a
 2¢ spread. It's an honest test, because any profit then comes only from your
 indicators. Expect roughly break-even or small losses. For real paper trading,
 get an API key at [dev.predict.fun](https://dev.predict.fun/) so it reads real
 ask prices.
 
-### Reading the backtest calibration table
+#### Reading the backtest calibration table
 Each cell shows: when the model favoured a side with that confidence, how often
 that side actually won. If the 80–90% column shows about 85%, the model is
 calibrated. Improve the model by changing settings until the columns line up,
 then trade only where the market's price is below the actual win rate.
 
-## Data sources
+### Data sources
 - **Binance public REST** (`api.binance.com`, mirror `data-api.binance.vision`):
   1-second klines with taker-buy volume, for price, volatility and indicators. No key needed.
 - **predict.fun REST** (`https://api.predict.fun`, `x-api-key` header):
@@ -113,7 +159,7 @@ then trade only where the market's price is below the actual win rate.
 > If the market lookup or the price-to-beat field differs, adjust
 > `updown/feeds.py` (`find_current_market`) and `updown/paper.py` (`_strike`).
 
-## Tests
+### Tests
 ```bash
 python -m unittest discover -s tests -t .
 ```

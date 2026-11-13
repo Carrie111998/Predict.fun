@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>predict.fun 5-min predictor</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--line:#262d36;--tx:#e6edf3;--mut:#8b949e;--up:#3fb950;--dn:#f85149;--acc:#58a6ff;--warn:#d29922}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+.wrap{max-width:1150px;margin:0 auto;padding:18px 14px 50px}
+h1{font-size:20px;margin:0}.sub{color:var(--mut);font-size:12px}
+.top{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px}
+.clock{font-size:30px;font-weight:700;color:var(--acc);font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.coin{font-size:18px;font-weight:700}.row{display:flex;justify-content:space-between;gap:8px;margin:3px 0}.k{color:var(--mut)}
+.big{font-size:34px;font-weight:800;line-height:1.1}.up{color:var(--up)}.dn{color:var(--dn)}.mut{color:var(--mut)}.warn{color:var(--warn)}
+.box{border-radius:10px;padding:12px;margin:10px 0;border:1px solid var(--line);background:#11161d}
+.box.u{border-color:var(--up);background:#12301c}.box.d{border-color:var(--dn);background:#3a1618}
+.verdict{font-weight:700;margin-top:6px}.verdict.go{color:var(--up)}.verdict.skip{color:var(--warn)}
+.bar{height:8px;border-radius:4px;background:var(--dn);overflow:hidden;margin:4px 0}.bar>i{display:block;height:100%;background:var(--up)}
+.chips{display:flex;gap:3px;margin-top:6px}.chip{width:14px;height:14px;border-radius:3px}.chip.u{background:var(--up)}.chip.d{background:var(--dn)}.chip.t{background:var(--mut)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}th{color:var(--mut);font-weight:500;font-size:12px}
+input{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 8px;width:80px}
+.note{color:var(--mut);font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="top">
+  <div><h1>predict.fun · 5-minute predictor</h1><div class="sub">BTC · ETH · BNB · prediction only, no orders are placed · <span id="st">connecting…</span></div></div>
+  <div style="text-align:right"><div class="sub">Round ends in</div><div class="clock" id="clock">–:––</div></div>
+</div>
+<div class="card" style="margin-bottom:14px;display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+  <label class="sub">Target profit per win $ <input id="target" type="number" step="0.05" min="0.05" value="0.25"></label>
+  <span class="sub">The suggestion tells you which side, the most to pay, and the stake that wins about this much.</span>
+</div>
+<div class="grid" id="coins"></div>
+
+<h2 class="sub" style="margin-top:24px;text-transform:uppercase;letter-spacing:.06em">How accurate is the current-round prediction? (live, logged by this tool)</h2>
+<div class="card"><table id="score"></table>
+<div class="note">Each round, the tool records its call at 1:00, 2:00, 3:00 and 4:00 into the round and checks it against the Binance 5-minute result.
+"Profit per $1" assumes you bought the predicted side at the Predict.fun price shown at that moment and held to the end (fees and slippage not included).
+Later checkpoints are more accurate but the price is higher, so the profit per win is smaller.</div></div>
+
+<h2 class="sub" style="margin-top:24px;text-transform:uppercase;letter-spacing:.06em">Model check on the last 2 days (thousands of rounds)</h2>
+<div class="card"><table id="calib"></table><div class="note">When the raw model says e.g. 80–90%, this is how often it was really right. The tool uses the real number for "most to pay", so it never overpays for an over-confident call.</div></div>
+
+<div class="card" style="margin-top:14px"><b>Read this first</b>
+<div class="note" style="font-size:13px;line-height:1.6">
+• <b>No tool wins every round.</b> A late call is right more often, but the side is already expensive: buying at 85¢ wins about $0.18 per $1 and a loss costs the full $1, so you need to be right about 85% of the time just to break even.<br>
+• The suggestion only says BUY when the market price is <b>below</b> what the model thinks the side is worth (with a 3-point safety margin). Otherwise it says skip – skipping a bad price is how you keep small profits.<br>
+• The <b>next round</b> is close to a coin flip before it starts; the lean shown is weak (see its historical accuracy).<br>
+• Predict.fun settles on Chainlink's price, the tool uses Binance – very close, but near-flat rounds can differ.</div></div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);let D=null,skew=0;
+const pc=x=>x==null?'–':Math.round(x*100)+'¢', pct=x=>x==null?'–':(x*100).toFixed(0)+'%';
+function card(k,c){
+  const cu=c.current,nx=c.next,side=cu.side,cls=side==='UP'?'up':side==='DOWN'?'dn':'mut';
+  const go=cu.worth&&cu.verdict&&cu.verdict.startsWith('BUY');
+  return `<div class="card">
+   <div class="row"><span class="coin">${k.toUpperCase()}</span><span class="${cu.movePct>=0?'up':'dn'}">${cu.price?cu.price.toLocaleString('en-US',{maximumFractionDigits:2}):'–'} &nbsp;${cu.movePct==null?'':(cu.movePct>=0?'+':'')+cu.movePct.toFixed(3)+'%'}</span></div>
+   <div class="sub">Round open (price to beat): ${cu.open?cu.open.toLocaleString('en-US',{maximumFractionDigits:2}):'–'}</div>
+   <div class="box ${side==='UP'?'u':side==='DOWN'?'d':''}">
+     <div class="sub">CURRENT ROUND – prediction</div>
+     <div class="big ${cls}">${side?(side==='UP'?'▲ UP ':'▼ DOWN ')+pct(cu.confidence):'waiting…'}</div>
+     <div class="bar"><i style="width:${cu.pUp==null?50:cu.pUp*100}%"></i></div>
+     <div class="row"><span class="k">Market price Up / Down</span><b>${pc(cu.upAsk)} / ${pc(cu.dnAsk)}</b></div>
+     <div class="row"><span class="k">Most to pay for ${side||'–'}</span><b>${pc(cu.maxPay)}</b></div>
+     <div class="verdict ${go?'go':'skip'}">${cu.verdict||''}</div>
+   </div>
+   <div class="box">
+     <div class="sub">NEXT ROUND</div>
+     <div class="row"><span class="k">Momentum lean</span><b class="${nx.lean==='UP'?'up':'dn'}">${nx.lean||'–'}</b></div>
+     <div class="row"><span class="k">Lean's past accuracy (${nx.rounds||0} rounds)</span><b>${pct(nx.histAccuracy)}</b></div>
+     <div class="row"><span class="k">Market price Up / Down</span><b>${pc(nx.upAsk)} / ${pc(nx.dnAsk)}</b></div>
+     <div class="sub">${nx.histAccuracy!=null&&nx.histAccuracy<0.55?'Weak – close to a coin flip. Better to wait for this round to start.':'Some edge, but small.'}</div>
+   </div>
+   <div class="sub">Last 12 rounds (old → new):</div>
+   <div class="chips">${(c.last12||[]).map(r=>`<span class="chip ${r>0?'u':r<0?'d':'t'}"></span>`).join('')}</div>
+  </div>`;
+}
+function render(){
+  if(!D)return;
+  const left=Math.max(0,D.roundEnd-(Date.now()+skew));$('#clock').textContent=Math.floor(left/60000)+':'+String(Math.floor(left%60000/1000)).padStart(2,'0');
+}
+async function poll(){
+  try{D=await (await fetch('/api/predict')).json();skew=D.now-Date.now();
+    $('#coins').innerHTML=Object.entries(D.coins).map(([k,c])=>card(k,c)).join('');
+    const sb=D.scoreboard||[];
+    $('#score').innerHTML='<thead><tr><th>Checkpoint / type</th><th>Predictions</th><th>Right</th><th>With price</th><th>Profit per $1</th></tr></thead><tbody>'+
+      (sb.length?sb.map(r=>`<tr><td>${r.cp.includes(':')?r.cp+' into round':'<b>'+r.cp+'</b>'}</td><td>${r.n}</td><td>${pct(r.accuracy)}</td><td>${r.priced}</td><td class="${r.roiPerDollar>0?'up':r.roiPerDollar<0?'dn':''}">${r.roiPerDollar==null?'–':(r.roiPerDollar>=0?'+':'')+'$'+r.roiPerDollar.toFixed(3)}</td></tr>`).join(''):'<tr><td colspan="5" class="mut">Collecting – results appear after the first rounds finish.</td></tr>')+'</tbody>';
+    const cb=D.calibration||[];$('#calib').innerHTML='<thead><tr><th>Model says</th><th>Rounds</th><th>Really right</th></tr></thead><tbody>'+cb.map(r=>'<tr><td>'+Math.round(r.from*100)+'–'+Math.round(r.to*100)+'%</td><td>'+r.n+'</td><td>'+pct(r.real)+'</td></tr>').join('')+'</tbody>';
+    $('#st').textContent='live · '+new Date().toLocaleTimeString();
+  }catch{$('#st').textContent='server not reachable'}
+}
+$('#target').onchange=async()=>{await fetch('/api/target',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({target:+$('#target').value})});poll()};
+setInterval(poll,2000);setInterval(render,250);poll();
+</script>
+</body>
+</html>
